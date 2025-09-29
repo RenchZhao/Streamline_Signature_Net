@@ -25,7 +25,8 @@ def calculate_prec_recall_f1(labels_lst, predicted_lst):
 
 def classify_report(labels_lst, predicted_lst, label_names, logger, out_path, metric_name):
     """Generate classification performance report"""
-    cls_report = classification_report(y_true=labels_lst, y_pred=predicted_lst, digits=5, target_names=label_names)
+    #cls_report = classification_report(y_true=labels_lst, y_pred=predicted_lst, digits=5, target_names=label_names)
+    cls_report = classification_report(y_true=labels_lst, y_pred=predicted_lst, digits=5, labels=list(range(len(label_names))), target_names=label_names)
     logger.info('=' * 55)
     logger.info('Best {} classification report:\n{}'.format(metric_name, cls_report))
     logger.info('=' * 55)
@@ -48,7 +49,7 @@ def classify_report(labels_lst, predicted_lst, label_names, logger, out_path, me
 def per_class_metric(labels_lst, predicted_lst, label_names, val_data_size, logger, out_path, metric_name):
     """Analysis for each class metric and its metric"""
     cls_report_dict = classification_report(y_true=labels_lst, y_pred=predicted_lst, digits=5,
-                                            target_names=label_names, output_dict=True)
+                                            labels=list(range(len(label_names))), target_names=label_names, output_dict=True)
     ratio_lst = []
     precision_lst = []
     recall_lst = []
@@ -250,8 +251,8 @@ def calculate_average_metric(h5_base_path, num_average_files, metric_name, redis
         predicted_lst = results['val_predictions']
         label_names = results['label_names']
         cls_report_dict = classification_report(y_true=labels_lst, y_pred=predicted_lst, digits=7,
-                                                target_names=label_names, output_dict=True)
-
+                                            labels=list(range(len(label_names))), target_names=label_names, output_dict=True)
+        print(cls_report_dict.keys())
         # calculate mean and standard deviation across clusters for each fold
         # results_per_fol: [accuracy, macro_precision, std_precision, macro_recall, std_recall, macro_f1, std_f1]
         results_per_fold = _metric_across_clusters(cls_report_dict, label_names)
@@ -275,7 +276,8 @@ def gen_199_classify_report(labels_lst, predicted_lst, label_names, logger, out_
     labels_lst[labels_lst_mask] = 198
     predicted_lst_mask = np.where(predicted_lst > 197)
     predicted_lst[predicted_lst_mask] = 198
-    cls_report = classification_report(y_true=labels_lst, y_pred=predicted_lst, digits=5, target_names=label_names)
+    cls_report = classification_report(y_true=labels_lst, y_pred=predicted_lst, digits=5,
+                                            labels=list(range(len(label_names))),target_names=label_names)
     if logger is not None:
         logger.info('=' * 55)
         logger.info('Best {} redistribute classification report:\n{}'.format(metric_name, cls_report))
@@ -320,3 +322,10 @@ def calculate_entire_data_average_metric(h5_base_path, num_average_files, metric
                            h5_base_path, num_average_files, metric_name, logger)
     
 
+if __name__=='__main__':
+    h5_base_path = '/home/rench/code/WMA-related/remake-SupWMA/ModelWeights/supwma_stage1_weights_ORG'
+    #h5_base_path = '/home/rench/code/WMA-related/remake-SupWMA/ModelWeights/nll_loss_raw_SigNet_tr_single_inception_stage1_weights_ORG'
+    #h5_base_path = '/home/rench/code/WMA-related/remake-SupWMA/ModelWeights/supwma_stage1_weights_sigNet'
+    #h5_base_path = '/new_home/zhaorenzhi/code/remake-SupWMA/ModelWeights/supwma_stage1_weights_ORG'
+    num_average_files=5
+    calculate_average_metric(h5_base_path, num_average_files, 'f1', False)

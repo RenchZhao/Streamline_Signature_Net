@@ -383,7 +383,70 @@ class FiberArray:
         # initialize hemisphere info
         if self.hemispheres:
             self.calculate_hemispheres()
+    
+    def convert_from_polydata_all(self, input_vtk_polydata, points_per_fiber=None):
 
+        """Convert input vtkPolyData to the fixed length fiber
+        representation of this class.
+        The polydata should contain the DeepWMAOutput of tractography.
+        The DeepWMAOutput is downsampled fibers in array format and
+        hemisphere info is also calculated.
+        """
+
+        # points used in discretization of each trajectory
+        if points_per_fiber is not None:
+            self.points_per_fiber = points_per_fiber
+
+        # line count. Assume all input lines are from tractography.
+        self.number_of_fibers = input_vtk_polydata.GetNumberOfLines()
+
+        if self.verbose:
+            print
+            "<fibers.py> Converting polydata to array representation. Lines:", \
+            self.number_of_fibers
+
+        # allocate array number of lines by line length
+        self.fiber_array_r = numpy.zeros((self.number_of_fibers,
+                                          self.points_per_fiber))
+        self.fiber_array_a = numpy.zeros((self.number_of_fibers,
+                                          self.points_per_fiber))
+        self.fiber_array_s = numpy.zeros((self.number_of_fibers,
+                                          self.points_per_fiber))
+
+        # loop over lines
+        input_vtk_polydata.GetLines().InitTraversal()
+        line_ptids = vtk.vtkIdList()
+        inpoints = input_vtk_polydata.GetPoints()
+
+        for lidx in range(0, self.number_of_fibers):
+
+            input_vtk_polydata.GetLines().GetNextCell(line_ptids)
+            line_length = line_ptids.GetNumberOfIds()
+
+            if self.verbose:
+                if lidx % 100 == 0:
+                    print
+                    "<fibers.py> Line:", lidx, "/", self.number_of_fibers
+                    print
+                    "<fibers.py> number of points:", line_length
+
+            # loop over the indices that we want and get those points
+            pidx = 0
+            for line_index in self._calculate_line_indices(line_length,
+                                                           self.points_per_fiber):
+                # do nearest neighbor interpolation: round index
+                ptidx = line_ptids.GetId(int(round(line_index)))
+
+                point = inpoints.GetPoint(ptidx)
+
+                self.fiber_array_r[lidx, pidx] = point[0]
+                self.fiber_array_a[lidx, pidx] = point[1]
+                self.fiber_array_s[lidx, pidx] = point[2]
+                pidx = pidx + 1
+
+        # initialize hemisphere info
+        if self.hemispheres:
+            self.calculate_hemispheres()
     def convert_from_polydata_with_FS(self, input_vtk_polydata, points_per_fiber=None):
 
         """Convert input vtkPolyData to the fixed length fiber

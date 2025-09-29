@@ -4,39 +4,63 @@ import pickle
 import time
 import h5py
 
+import numpy as np
+
 import torch
 import torch.nn.parallel
 import torch.optim as optim
 import torch.utils.data
 
-from utils.dataset import ORGDataset
-from utils.model import PointNetCls
+from utils.dataset import HCPDataset, ORGDataset, _feat_to_3D
+from utils.model import get_model, get_free_gpu
 from utils.logger import create_logger
 from utils.metrics_plots import classify_report, per_class_metric, process_curves, \
     calculate_prec_recall_f1, best_swap, save_best_weights, calculate_average_metric, gen_199_classify_report
 from utils.funcs import unify_path, makepath, fix_seed
+from utils.custom_loss import *
 
 import torch.nn.functional as F
 
+from new.lars import LARS
+
 # GPU check
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+device = get_free_gpu() #torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 
-def load_data():
+def load_data(dataset='HCP', transform=None):
     """load train and validation data"""
     # load feature and label data
-    train_dataset = ORGDataset(
-        root=args.input_path,
-        logger=logger,
-        num_fold=num_fold,
-        k=args.k_fold,
-        split='train')
-    val_dataset = ORGDataset(
-        root=args.input_path,
-        logger=logger,
-        num_fold=num_fold,
-        k=args.k_fold,
-        split='val')
+    if dataset=='ORG':
+        train_dataset = ORGDataset(
+            root=args.input_path,
+            logger=logger,
+            num_fold=num_fold,
+            k=args.k_fold,
+            transform=transform,
+            split='train')
+        val_dataset = ORGDataset(
+            root=args.input_path,
+            logger=logger,
+            num_fold=num_fold,
+            k=args.k_fold,
+            transform=transform,
+            split='val')
+    else:
+        train_dataset = HCPDataset(
+            root=args.input_path,
+            logger=logger,
+            num_fold=num_fold,
+            k=args.k_fold,
+            transform=transform,
+            split='train')
+
+        val_dataset = HCPDataset(
+            root=args.input_path,
+            logger=logger,
+            num_fold=num_fold,
+            k=args.k_fold,
+            transform=transform,
+            split='val')
 
     train_loader = torch.utils.data.DataLoader(
         train_dataset, batch_size=args.train_batch_size,
@@ -58,13 +82,15 @@ def load_data():
     assert train_label_names == val_label_names
     label_names = train_label_names
     label_names_h5 = h5py.File(os.path.join(args.out_path, 'label_names.h5'), 'w')
-    label_names_h5['y_names'] = label_names
+    print(list(label_names))
+    label_names_h5['y_names'] = list(label_names)
     logger.info('The label names are: {}'.format(str(label_names)))
 
     return train_loader, val_loader, label_names, num_classes, train_data_size, val_data_size
 
 
-def train_val_net(net):
+
+def train_val_net(net, running_transform=None):
     """train and validation of the network"""
     time_start = time.time()
     train_num_batch = train_data_size / args.train_batch_size
@@ -92,14 +118,17 @@ def train_val_net(net):
         for i, data in enumerate(train_loader, 0):
             points, label = data  # points [B, N, 3]
             label = label[:, 0]  # [B,1] rank2 to (, B) rank1
-            points = points.transpose(2, 1)  # points [B, 3, N]
+            if running_transform:
+                points = torch.from_numpy(running_transform(points.numpy()).astype(np.float32))
             points, label = points.to(device), label.to(device)
             optimizer.zero_grad()
             net = net.train()
             pred = net(points)
-            loss = F.nll_loss(pred, label)
+            loss = criterion(pred, label)
             loss.backward()
             optimizer.step()
+            if not isinstance(pred, torch.Tensor):
+                pred = pred[0]
             if args.scheduler == 'wucd':
                 scheduler.step(epoch-1 + i/train_num_batch)
             _, pred_idx = torch.max(pred, dim=1)
@@ -112,13 +141,19 @@ def train_val_net(net):
             train_labels_lst.extend(label)
             pred_idx = pred_idx.cpu().detach().numpy().tolist()
             train_predicted_lst.extend(pred_idx)
-        if args.scheduler == 'step':
-            scheduler.step()
+
         # train accuracy loss
         avg_train_acc = total_train_correct / float(train_data_size)
         avg_train_loss = total_train_loss / float(train_num_batch)
         train_acc_lst.append(avg_train_acc)
         train_loss_lst.append(avg_train_loss)
+
+        if args.scheduler == 'step':
+            scheduler.step()
+        elif args.scheduler == 'ReduceLROnPlateau':
+            scheduler.step(avg_train_acc)
+
+
         # train macro p, r, f1
         mac_train_precision, mac_train_recall, mac_train_f1 = calculate_prec_recall_f1(train_labels_lst, train_predicted_lst)
         train_precision_lst.append(mac_train_precision)
@@ -135,11 +170,23 @@ def train_val_net(net):
             for j, data in (enumerate(val_loader, 0)):
                 points, label = data
                 label = label[:, 0]
-                points = points.transpose(2, 1)
+                if running_transform:
+                    points = torch.from_numpy(running_transform(points.numpy()).astype(np.float32))
                 points, label = points.to(device), label.to(device)
                 net = net.eval()
-                pred = net(points)
-                loss = F.nll_loss(pred, label)
+                try:
+                    pred = net(points)
+                except RuntimeError as exception:
+                    if "out of memory" in str(exception):
+                        logger.info("WARNING: out of memory")
+                        if hasattr(torch.cuda, 'empty_cache'):
+                            torch.cuda.empty_cache()
+                    else:
+                        raise exception
+                    
+                loss = criterion(pred, label)
+                if not isinstance(pred, torch.Tensor):
+                    pred = pred[0]
                 _, pred_idx = torch.max(pred, dim=1)
                 correct = pred_idx.eq(label.data).cpu().sum()
                 # for calculating validation accuracy and loss
@@ -198,7 +245,7 @@ def train_val_net(net):
     total_time = round(time_end-time_start, 2)
     logger.info('Total processing time is {}s'.format(total_time))
 
-
+    
 if __name__ == '__main__':
     # Variable Space
     parser = argparse.ArgumentParser(description="Train stage 1 model",
@@ -210,12 +257,18 @@ if __name__ == '__main__':
                         help='Save trained models')
 
     # parameters
-    parser.add_argument('--k_fold', type=int, default=5, help='fold of cross-validation')
+    parser.add_argument('--model_name', type=str, default='PointNetCls', help='model for trainging')
+    parser.add_argument('--dataset', type=str, default='HCP', help='dataset for trainging')
+    parser.add_argument('-RAS_3D', default=False, action='store_true', help='get DeepWMA 3D RAS feature of dataset')
+    parser.add_argument('--loss', type=str, default='nll_loss', help='loss of training')
+    parser.add_argument('--dict_feat_size', type=int, default=256, help='if use loss function LabelDictionaryAndCrossEntropy. It should be specified.')
+    parser.add_argument('--k_fold', type=int, default=5, help='fold of all data')
+    parser.add_argument('--val_fold', type=int, default=None, help='fold number of validation data')
     parser.add_argument('--num_workers', type=int, help='number of data loading workers', default=4)
     parser.add_argument('--lr', type=float, default=1e-3, help='learning rate')
     parser.add_argument('--opt', type=str, required=True, help='type of optimizer')
-    parser.add_argument('--weight_decay', type=float, default=0, help='weight decay for Adam')
-    parser.add_argument('--momentum', type=float, default=0, help='momentum for SGD')
+    parser.add_argument('--weight_decay', type=float, default=5e-2, help='weight decay for Adam')
+    parser.add_argument('--momentum', type=float, default=0.9, help='momentum for SGD')
     parser.add_argument('--scheduler', type=str, default='step', help='type of learning rate scheduler')
     parser.add_argument('--step_size', type=int, default=20, help='Period of learning rate decay')
     parser.add_argument('--decay_factor', type=float, default=0.5, help='Multiplicative factor of learning rate decay')
@@ -242,9 +295,12 @@ if __name__ == '__main__':
 
     if args.eval_fold_zero:
         fold_lst = [0]
+    elif args.val_fold is not None and 0<=args.val_fold<args.k_fold:
+        fold_lst = [args.val_fold]
     else:
         fold_lst = [i for i in range(args.k_fold)]
 
+    train_loader, val_loader = None, None # initialize 
     for num_fold in fold_lst:
         num_fold = num_fold + 1
         args.out_path = os.path.join(args.out_path_base, str(num_fold))
@@ -256,31 +312,48 @@ if __name__ == '__main__':
         logger.info(args)
         logger.info('=' * 55)
         logger.info('Implement {} fold experiment'.format(num_fold))
+
         # load data
+        if train_loader is not None:
+            train_loader = None # save RAM
+        if val_loader is not None:
+            val_loader = None # save RAM
+        
         train_loader, val_loader, label_names, \
-        num_classes, train_data_size, val_data_size = load_data()
+        num_classes, train_data_size, val_data_size = load_data(dataset=args.dataset)
+
+        running_transform = None
+        if args.RAS_3D:
+            running_transform =_feat_to_3D
 
         # model setting
-        classifier = PointNetCls(k=num_classes)  # Remove transformation nets
+        classifier = get_model(model_name=args.model_name, num_classes=num_classes, dict_feat_size=args.dict_feat_size)
+        criterion = get_criterion(loss_name=args.loss, num_classes=num_classes, dict_feat_size=args.dict_feat_size, device=device)
+        # print(device)
 
         # optimizers
         if args.opt == 'Adam':
             optimizer = optim.Adam(classifier.parameters(), lr=args.lr, betas=(0.9, 0.999), weight_decay=args.weight_decay)
         elif args.opt == 'SGD':
             optimizer = optim.SGD(classifier.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
+        elif args.opt == 'LARS':
+            base_optimizer = optim.Adam(classifier.parameters(), lr=args.lr, betas=(0.9, 0.999), weight_decay=args.weight_decay)
+            optimizer = LARS(optimizer=base_optimizer, eps=1e-8, trust_coef=0.001)
         else:
-            raise ValueError('Please input valid optimizers Adam | SGD')
+            raise ValueError('Please input valid optimizers Adam | SGD | LARS')
         # schedulers
         if args.scheduler == 'step':
             scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=args.step_size, gamma=args.decay_factor)
         elif args.scheduler == 'wucd':
             scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=args.T_0, T_mult=args.T_mult)
+        elif args.scheduler=='ReduceLROnPlateau':
+            scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', patience=2, factor=0.5, verbose=True)
         else:
-            raise ValueError('Please input valid schedulers step | wucd')
+            raise ValueError('Please input valid schedulers step | wucd | ReduceLROnPlateau')
 
         classifier.to(device)
         # train and eval net
-        train_val_net(classifier)
+        train_val_net(classifier, running_transform=running_transform)
 
     # clean the logger
     logger.handlers.clear()

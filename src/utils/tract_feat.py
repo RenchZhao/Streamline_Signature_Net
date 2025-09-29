@@ -1,7 +1,12 @@
-"""Reference from https://github.com/zhangfanmark/DeepWMA"""
+"""Modified from https://github.com/zhangfanmark/DeepWMA"""
 import numpy as np
 import whitematteranalysis as wma
 import utils.fibers as fibers
+
+import torch
+import signatory
+import vtk
+# from nibabel.streamlines.array_sequence import ArraySequence
 
 
 def feat_RAS(pd_tract, number_of_points=15):
@@ -91,3 +96,34 @@ def downsample(ds_step, x_data, y_data=None):
         y_data_ds = y_data[::ds_step]
 
     return (x_data_ds, y_data_ds)
+
+if __name__ == '__main__':
+    import matplotlib.pyplot as plt
+    vtk_file = 'trks/AF_left.vtk'
+    M=15
+    trajectory=convert_from_polydata_all(wma.io.read_polydata(vtk_file))[8]
+    fix_sample_trajectory=feat_RAS(wma.io.read_polydata(vtk_file),number_of_points=M)[8]
+    
+    fig = plt.figure()
+    ax1 = plt.axes(projection='3d')
+    print(trajectory.shape)
+    print(resample_trajectory(trajectory, M).shape)
+    print(fix_sample_trajectory.shape)
+    
+    ax1.plot3D(*trajectory.transpose(1,0))
+    #ax1.plot3D(*(resample_trajectory(trajectory, M).transpose(1,0)))
+    ax1.plot3D(*fix_sample_trajectory.transpose(1,0))
+    # plt.show()
+    plt.savefig('./out.png')
+
+    # from dipy.io.vtk import load_vtk_streamlines
+    # vtk_file = 'trks/AF_left.vtk'
+    # # print(load_vtk_streamlines(vtk_file))
+    # # print(convert_from_polydata_all(wma.io.read_polydata(vtk_file)))
+    # # load_vtk_streamlines(vtk_file)==convert_from_polydata_all(wma.io.read_polydata(vtk_file))
+    # a=load_vtk_streamlines(vtk_file)
+    # b=convert_from_polydata_all(wma.io.read_polydata(vtk_file))
+    # for i in range(10):
+    #     print(i)
+    #     print(a[i].shape)
+    #     print(b[i].shape)
